@@ -6,11 +6,13 @@ import (
 	"io"
 	"time"
 
+	"github.com/google/gousb"
+	"github.com/pipe01/flydigictl/pkg/flydigi/products"
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol"
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol/internal"
 	"github.com/pipe01/flydigictl/pkg/uinput"
+	"github.com/pipe01/flydigictl/pkg/utils"
 
-	"github.com/karalabe/usb"
 	"github.com/rs/zerolog/log"
 )
 
@@ -26,57 +28,106 @@ const (
 	commandReadLEDConfig          = 229
 )
 
-type configTrasmission struct {
-	chunks [][]byte
-	ackch  chan int
-}
-
 type protocolDInput struct {
-	rw    io.ReadWriteCloser
+	in     *gousb.InEndpoint
+	out    *gousb.OutEndpoint
+	closer io.Closer
+
 	msgch chan protocol.Message
+
+	gpInfo *products.GamepadInfo
 
 	configWriter *internal.ConfigWriter
 
 	configReader, ledConfigReader *internal.ConfigReader
 }
 
-func Open() (protocol.Protocol, error) {
-	devs, err := usb.EnumerateHid(0x04b4, 0x2412)
+func Open() (prot protocol.Protocol, err error) {
+	ctx := gousb.NewContext()
+
+	var closers utils.MultiCloser
+	defer func() {
+		if err != nil {
+			closers.Close()
+		}
+	}()
+
+	devs, err := ctx.OpenDevices(func(desc *gousb.DeviceDesc) bool {
+		return desc.Vendor == 0x04b4 && desc.Product == 0x2412
+	})
 	if err != nil {
 		return nil, fmt.Errorf("enumerate devices: %w", err)
 	}
+
+	log.Debug().Int("count", len(devs)).Msg("found dinput usb devices")
 
 	if len(devs) == 0 {
 		return nil, protocol.ErrGamepadNotPresent
 	}
 
+	dev := devs[0]
+	closers.AddCloser(dev)
+
+	manufacturer, err := dev.Manufacturer()
+	if err != nil {
+		return nil, fmt.Errorf("get manufacturer: %w", err)
+	}
+	product, err := dev.Product()
+	if err != nil {
+		return nil, fmt.Errorf("get manufacturer: %w", err)
+	}
+	serialNumber, err := dev.SerialNumber()
+	if err != nil {
+		return nil, fmt.Errorf("get serial number: %w", err)
+	}
+
+	log.Info().Str("manufacturer", manufacturer).Str("product", product).Str("serial", serialNumber).Msg("found gamepad")
+
+	if err := dev.SetAutoDetach(true); err != nil {
+		log.Err(err).Msg("failed to enable kernel driver auto detach mode")
+	}
+
+	cfg, err := dev.Config(1)
+	if err != nil {
+		return nil, fmt.Errorf("open configuration: %w", err)
+	}
+	closers.AddCloser(cfg)
+
+	intf, err := cfg.Interface(2, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open interface: %w", err)
+	}
+	closers.AddFunc(intf.Close)
+
+	outep, err := intf.OutEndpoint(5)
+	if err != nil {
+		return nil, fmt.Errorf("open out endpoint: %w", err)
+	}
+
+	inep, err := intf.InEndpoint(3)
+	if err != nil {
+		return nil, fmt.Errorf("open in endpoint: %w", err)
+	}
+
+	gpInfo := products.Gamepads[products.GamepadVader3]
+
 	p := &protocolDInput{
+		in:              inep,
+		out:             outep,
+		closer:          &closers,
 		msgch:           make(chan protocol.Message, 10),
 		configReader:    internal.NewConfigReader(packageLength, 10),
 		ledConfigReader: internal.NewConfigReader(ledPackageLength, 10),
+		configWriter:    internal.NewConfigWriter(outep),
+		gpInfo:          &gpInfo,
 	}
+	go p.readLoop()
 
-	for _, d := range devs {
-		if d.Interface == 2 {
-			dev, err := d.Open()
-			if err != nil {
-				return nil, fmt.Errorf("open usb device: %w", err)
-			}
-
-			p.rw = dev
-			p.configWriter = internal.NewConfigWriter(dev)
-
-			go p.readLoop()
-
-			return p, nil
-		}
-	}
-
-	return nil, protocol.ErrGamepadNotPresent
+	return p, nil
 }
 
 func (d *protocolDInput) Close() error {
-	return d.rw.Close()
+	return d.closer.Close()
 }
 
 func (d *protocolDInput) Messages() <-chan protocol.Message {
@@ -84,15 +135,15 @@ func (d *protocolDInput) Messages() <-chan protocol.Message {
 }
 
 func (d *protocolDInput) Inputs() ([]uinput.GamepadAxis, []uinput.GamepadButton) {
-	return nil, nil
+	return d.gpInfo.Axes, d.gpInfo.Buttons
 }
 
 func (d *protocolDInput) Manufacturer() string {
-	return ""
+	return "Flydigi"
 }
 
 func (d *protocolDInput) Product() string {
-	return ""
+	return d.gpInfo.Name
 }
 
 func (d *protocolDInput) readLoop() {
@@ -101,7 +152,7 @@ func (d *protocolDInput) readLoop() {
 	defer close(d.msgch)
 
 	for {
-		n, err := d.rw.Read(buf)
+		n, err := d.in.Read(buf)
 		if err != nil {
 			break
 		}
@@ -161,11 +212,22 @@ func (d *protocolDInput) sendCommand(cmd byte, args ...byte) error {
 	buf[1] = cmd
 	copy(buf[2:], args)
 
-	_, err := d.rw.Write(buf)
+	_, err := d.out.Write(buf)
 	return err
 }
 
 func (d *protocolDInput) resolveUsbData(p []byte) (msg protocol.Message, ok bool) {
+	log.Debug().Int("length", len(p)).Hex("data", p).Msg("got usb data")
+
+	buttons, axes, ok := utils.ParseXboxGamepadInput(p)
+	if ok {
+		log.Debug().Msg("got input data")
+		return protocol.MessageGamepadInput{
+			Buttons: buttons,
+			Axes:    axes,
+		}, true
+	}
+
 	if p[15] == 235 {
 		d.configReader.GotPackage(int(p[3]), p[5:15])
 
