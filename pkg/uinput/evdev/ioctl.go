@@ -268,7 +268,17 @@ func ioctlUIDEVCREATE(fd uintptr) error {
 	return doIoctl(fd, code, nil)
 }
 
+func ioctlUIDEVSETUP(fd uintptr, setup UinputSetup) error {
+	code := ioctlMakeCode(ioctlDirWrite, 'U', 3, unsafe.Sizeof(setup))
+	return doIoctl(fd, code, unsafe.Pointer(&setup))
+}
+
 func ioctlUIDEVDESTROY(fd uintptr) error {
 	code := ioctlMakeCode(ioctlDirNone, 'U', 2, 0)
 	return doIoctl(fd, code, nil)
+}
+
+func ioctlUIABSSETUP(fd uintptr, abs UinputAbsSetup) error {
+	code := ioctlMakeCode(ioctlDirWrite, 'U', 4, unsafe.Sizeof(abs))
+	return doIoctl(fd, code, unsafe.Pointer(&abs))
 }

@@ -87,3 +87,14 @@ type UinputUserDevice struct {
 	Absfuzz    [absSize]int32
 	Absflat    [absSize]int32
 }
+
+type UinputSetup struct {
+	ID         InputID
+	Name       [uinputMaxNameSize]byte
+	EffectsMax uint32
+}
+
+type UinputAbsSetup struct {
+	Code    EvCode
+	AbsInfo AbsInfo
+}

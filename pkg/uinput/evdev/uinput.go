@@ -1,8 +1,6 @@
 package evdev
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"syscall"
@@ -16,8 +14,8 @@ const (
 // CreateDevice creates a device from scratch with the provided capabilities and name
 // If set up fails the device will be removed from the system,
 // once set up it can be removed by calling dev.Close
-func CreateDevice(name string, id InputID, capabilities map[EvType][]EvCode) (*InputDevice, error) {
-	deviceFile, err := os.OpenFile("/dev/uinput", syscall.O_WRONLY|syscall.O_NONBLOCK, 0660)
+func CreateDevice(name string, id InputID, capabilities map[EvType][]EvCode, abs []UinputAbsSetup) (*InputDevice, error) {
+	deviceFile, err := os.OpenFile("/dev/uinput", syscall.O_RDWR|syscall.O_NONBLOCK, 0660)
 	if err != nil {
 		return nil, err
 	}
@@ -38,9 +36,17 @@ func CreateDevice(name string, id InputID, capabilities map[EvType][]EvCode) (*I
 		}
 	}
 
-	if _, err = createInputDevice(newDev.file, UinputUserDevice{
-		Name: toUinputName([]byte(name)),
-		ID:   id,
+	for _, setup := range abs {
+		if err := ioctlUIABSSETUP(newDev.file.Fd(), setup); err != nil {
+			DestroyDevice(newDev)
+			return nil, fmt.Errorf("failed to setup abs for %d: %w", setup.Code, err)
+		}
+	}
+
+	if _, err = createInputDevice(newDev.file, UinputSetup{
+		Name:       toUinputName([]byte(name)),
+		ID:         id,
+		EffectsMax: 16,
 	}); err != nil {
 		DestroyDevice(newDev)
 		return nil, fmt.Errorf("failed to create device: %w", err)
@@ -83,7 +89,7 @@ func CloneDevice(name string, dev *InputDevice) (*InputDevice, error) {
 		return nil, fmt.Errorf("failed to get original device id: %w", err)
 	}
 
-	if _, err = createInputDevice(newDev.file, UinputUserDevice{
+	if _, err = createInputDevice(newDev.file, UinputSetup{
 		Name: toUinputName([]byte(name)),
 		ID:   id,
 	}); err != nil {
@@ -138,17 +144,10 @@ func toUinputName(name []byte) (uinputName [uinputMaxNameSize]byte) {
 	return fixedSizeName
 }
 
-func createInputDevice(file *os.File, dev UinputUserDevice) (fd *os.File, err error) {
-	buf := new(bytes.Buffer)
-
-	if err = binary.Write(buf, binary.LittleEndian, dev); err != nil {
+func createInputDevice(file *os.File, dev UinputSetup) (fd *os.File, err error) {
+	if err = ioctlUIDEVSETUP(file.Fd(), dev); err != nil {
 		file.Close()
-		return nil, fmt.Errorf("failed to write user device buffer: %w", err)
-	}
-
-	if _, err = file.Write(buf.Bytes()); err != nil {
-		file.Close()
-		return nil, fmt.Errorf("failed to write uidev struct to device file: %w", err)
+		return nil, fmt.Errorf("failed to setup device: %w", err)
 	}
 
 	if err = ioctlUIDEVCREATE(file.Fd()); err != nil {
