@@ -8,6 +8,7 @@ import (
 
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol"
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol/internal"
+	"github.com/pipe01/flydigictl/pkg/uinput"
 
 	"github.com/karalabe/usb"
 	"github.com/rs/zerolog/log"
@@ -80,6 +81,10 @@ func (d *protocolDInput) Close() error {
 
 func (d *protocolDInput) Messages() <-chan protocol.Message {
 	return d.msgch
+}
+
+func (d *protocolDInput) Inputs() ([]uinput.GamepadAxis, []uinput.GamepadButton) {
+	return nil, nil
 }
 
 func (d *protocolDInput) readLoop() {

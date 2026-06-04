@@ -3,6 +3,8 @@ package protocol
 import (
 	"context"
 	"errors"
+
+	"github.com/pipe01/flydigictl/pkg/uinput"
 )
 
 var (
@@ -24,4 +26,6 @@ type Protocol interface {
 
 	Messages() <-chan Message
 	Send(ctx context.Context, cmd Command) error
+
+	Inputs() ([]uinput.GamepadAxis, []uinput.GamepadButton)
 }

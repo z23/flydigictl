@@ -13,6 +13,7 @@ import (
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol"
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol/dinput"
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol/xinput"
+	"github.com/pipe01/flydigictl/pkg/uinput"
 	"github.com/pipe01/flydigictl/pkg/utils"
 
 	"github.com/rs/zerolog/log"
@@ -86,6 +87,7 @@ type commandCallbackFunc func(data []byte)
 
 type Gamepad struct {
 	prot protocol.Protocol
+	ug   *uinput.UinputGamepad
 
 	devInfo *utils.CondValue[FDGDeviceInfo]
 
@@ -110,8 +112,16 @@ func OpenGamepad() (*Gamepad, error) {
 		}
 	}
 
+	axes, buttons := prot.Inputs()
+
+	ug, err := uinput.NewUinputGamepad("Flydigi Vader 3 Pro", axes, buttons)
+	if err != nil {
+		return nil, fmt.Errorf("create uinput gamepad: %w", err)
+	}
+
 	gamepad := &Gamepad{
 		prot:          prot,
+		ug:            ug,
 		closech:       make(chan struct{}),
 		devInfo:       utils.NewCondValue[FDGDeviceInfo](&sync.Mutex{}),
 		currConfig:    utils.NewCondValue[config.AllConfigBean](&sync.Mutex{}),
@@ -160,9 +170,29 @@ func (g *Gamepad) handleMessage(msg protocol.Message) error {
 	case protocol.MessageLEDConfigReadCB:
 		return g.handleLEDConfigRead(msg)
 
+	case protocol.MessageGamepadInput:
+		return g.handleGamepadInput(msg)
+
 	default:
 		return errors.New("unknown message type")
 	}
+}
+
+func (g *Gamepad) handleGamepadInput(msg protocol.MessageGamepadInput) error {
+	axes, buttons := g.prot.Inputs()
+
+	for i := range axes {
+		if err := g.ug.Abs(i, msg.Axes[i]); err != nil {
+			return err
+		}
+	}
+	for i := range buttons {
+		if err := g.ug.Key(i, msg.Buttons[i]); err != nil {
+			return err
+		}
+	}
+
+	return g.ug.Sync()
 }
 
 func (g *Gamepad) handleDeviceInfo(msg protocol.MessageGamePadInfo) error {

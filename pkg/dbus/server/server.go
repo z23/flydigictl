@@ -335,7 +335,8 @@ func (s *Server) Listen(useSessionBus bool) error {
 	}
 
 	log.Info().Msg("connected to dbus")
-	select {}
+
+	return nil
 }
 
 func makeError(name string, err error) *dbus.Error {

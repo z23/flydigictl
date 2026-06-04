@@ -2,6 +2,7 @@ package xinput
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"sync/atomic"
@@ -9,11 +10,12 @@ import (
 
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol"
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol/internal"
+	"github.com/pipe01/flydigictl/pkg/uinput"
+	"github.com/pipe01/flydigictl/pkg/uinput/evdev"
 	"github.com/pipe01/flydigictl/pkg/utils"
 
 	"github.com/google/gousb"
 	"github.com/rs/zerolog/log"
-	"pault.ag/go/modprobe"
 )
 
 const (
@@ -33,14 +35,16 @@ type protocolXInput struct {
 	out    *gousb.OutEndpoint
 	closer io.Closer
 
-	isClosed       atomic.Bool
-	xpadWasEnabled bool
+	isClosed atomic.Bool
 
 	msgch chan protocol.Message
 
 	configReader, ledConfigReader *internal.ConfigReader
 
 	configWriter *internal.ConfigWriter
+
+	axes    []uinput.GamepadAxis
+	buttons []uinput.GamepadButton
 }
 
 func Open() (protocol.Protocol, error) {
@@ -64,17 +68,15 @@ func Open() (protocol.Protocol, error) {
 	dev := devs[0]
 	closers.AddCloser(dev)
 
+	if err := dev.SetAutoDetach(true); err != nil {
+		log.Err(err).Msg("failed to enable kernel driver auto detach mode")
+	}
+
 	cfg, err := dev.Config(1)
 	if err != nil {
 		return nil, fmt.Errorf("open configuration: %w", err)
 	}
 	closers.AddCloser(cfg)
-
-	err = modprobe.Remove("xpad")
-	xpadWasEnabled := err == nil
-	if xpadWasEnabled {
-		log.Debug().Msg("unloaded xpad module")
-	}
 
 	intf, err := cfg.Interface(0, 0)
 	if err != nil {
@@ -92,19 +94,50 @@ func Open() (protocol.Protocol, error) {
 		return nil, fmt.Errorf("open in endpoint: %w", err)
 	}
 
+	axes := []uinput.GamepadAxis{
+		{Name: "Left Joystick X", Code: evdev.ABS_X, Min: -32768, Max: 32767},
+		{Name: "Left Joystick Y", Code: evdev.ABS_Y, Min: -32768, Max: 32767},
+		{Name: "Right Joystick X", Code: evdev.ABS_RX, Min: -32768, Max: 32767},
+		{Name: "Right Joystick Y", Code: evdev.ABS_RY, Min: -32768, Max: 32767},
+		{Name: "Left Trigger", Code: evdev.ABS_Z, Min: 0, Max: 255},
+		{Name: "Right Trigger", Code: evdev.ABS_RZ, Min: 0, Max: 255},
+		{Name: "DPad X", Code: evdev.ABS_HAT0X, Min: -1, Max: 1},
+		{Name: "DPad Y", Code: evdev.ABS_HAT0Y, Min: -1, Max: 1},
+	}
+	buttons := []uinput.GamepadButton{
+		{Name: "A", Code: evdev.BTN_A},
+		{Name: "B", Code: evdev.BTN_B},
+		{Name: "X", Code: evdev.BTN_X},
+		{Name: "Y", Code: evdev.BTN_Y},
+		{Name: "Start", Code: evdev.BTN_START},
+		{Name: "Select", Code: evdev.BTN_SELECT},
+		{Name: "Left Joystick", Code: evdev.BTN_THUMBL},
+		{Name: "Right Joystick", Code: evdev.BTN_THUMBR},
+		{Name: "Left Bumper", Code: evdev.BTN_TL},
+		{Name: "Right Bumper", Code: evdev.BTN_TR},
+		{Name: "C", Code: evdev.BTN_C},
+		{Name: "Z", Code: evdev.BTN_Z},
+		{Name: "Home", Code: evdev.BTN_MODE},
+	}
+
 	p := &protocolXInput{
 		in:              inep,
 		out:             outep,
 		closer:          &closers,
-		xpadWasEnabled:  xpadWasEnabled,
 		msgch:           make(chan protocol.Message, 10),
 		configReader:    internal.NewConfigReader(packageLength, 10),
 		ledConfigReader: internal.NewConfigReader(ledPackageLength, 10),
 		configWriter:    internal.NewConfigWriter(outep),
+		axes:            axes,
+		buttons:         buttons,
 	}
 	go p.readLoop()
 
 	return p, nil
+}
+
+func (d *protocolXInput) Inputs() ([]uinput.GamepadAxis, []uinput.GamepadButton) {
+	return d.axes, d.buttons
 }
 
 func (d *protocolXInput) Close() error {
@@ -112,17 +145,7 @@ func (d *protocolXInput) Close() error {
 		return nil
 	}
 
-	err := d.closer.Close()
-	if d.xpadWasEnabled {
-		log.Debug().Msg("loading xpad module")
-
-		err = modprobe.Load("xpad", "")
-		if err != nil {
-			log.Err(err).Msg("failed to load xpad module")
-		}
-	}
-
-	return err
+	return d.closer.Close()
 }
 
 func (d *protocolXInput) Messages() <-chan protocol.Message {
@@ -134,9 +157,13 @@ func (d *protocolXInput) readLoop() {
 
 	defer close(d.msgch)
 
+	log.Debug().Msg("starting xinput read loop")
+
 	for {
 		n, err := d.in.Read(buf)
 		if err != nil {
+			log.Err(err).Msg(fmt.Sprintf("%#v", err))
+
 			if status, ok := err.(gousb.TransferStatus); !ok || status != gousb.TransferNoDevice {
 				log.Err(err).Msg("failed to read data from usb")
 			}
@@ -148,13 +175,61 @@ func (d *protocolXInput) readLoop() {
 
 		msg, ok := d.resolveUsbData(data)
 		if ok {
+			// log.Debug().Any("msg", msg).Msg("msg")
 			d.msgch <- msg
 		}
 	}
+
+	log.Debug().Msg("xinput read loop exited")
 }
 
 func (d *protocolXInput) resolveUsbData(p []byte) (protocol.Message, bool) {
-	if p[14] == 0xA5 {
+	if len(p) == 32 && p[0] == 0 && p[1] == 20 {
+		// p[14], p[15] and p[16] are the gyroscope axes, but there are no evdev codes for them.
+		// We could create a second virtual gamepad only for gyroscope but that's probably confusing for the user.
+
+		var dpadx, dpady int32
+		if (p[2]>>0)&1 != 0 {
+			dpady -= 1
+		}
+		if (p[2]>>1)&1 != 0 {
+			dpady += 1
+		}
+		if (p[2]>>2)&1 != 0 {
+			dpadx -= 1
+		}
+		if (p[2]>>3)&1 != 0 {
+			dpadx += 1
+		}
+
+		return protocol.MessageGamepadInput{
+			Buttons: []bool{
+				(p[3]>>4)&1 != 0,
+				(p[3]>>5)&1 != 0,
+				(p[3]>>6)&1 != 0,
+				(p[3]>>7)&1 != 0,
+				(p[2]>>4)&1 != 0,
+				(p[2]>>5)&1 != 0,
+				(p[18]>>6)&1 != 0,
+				(p[18]>>7)&1 != 0,
+				(p[3]>>0)&1 != 0,
+				(p[3]>>1)&1 != 0,
+				(p[19]>>0)&1 != 0,
+				(p[19]>>1)&1 != 0,
+				(p[3]>>2)&1 != 0,
+			},
+			Axes: []int32{
+				int32(int16(binary.LittleEndian.Uint16(p[6:]))),
+				-int32(int16(binary.LittleEndian.Uint16(p[8:]))),
+				int32(int16(binary.LittleEndian.Uint16(p[10:]))),
+				-int32(int16(binary.LittleEndian.Uint16(p[12:]))),
+				int32(p[4]),
+				int32(p[5]),
+				dpadx,
+				dpady,
+			},
+		}, true
+	} else if p[14] == 0xA5 {
 		switch p[15] {
 		case 16:
 			return protocol.MessageGamePadInfo{

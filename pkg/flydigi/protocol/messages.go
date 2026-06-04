@@ -4,6 +4,13 @@ type raw []byte
 
 func (raw) message() {}
 
+type MessageGamepadInput struct {
+	raw
+
+	Buttons []bool
+	Axes    []int32
+}
+
 type MessageGamepadConfigReadCB struct {
 	raw
 	Data []byte
