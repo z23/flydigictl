@@ -2,16 +2,15 @@ package xinput
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"sync/atomic"
 	"time"
 
+	"github.com/pipe01/flydigictl/pkg/flydigi/products"
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol"
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol/internal"
 	"github.com/pipe01/flydigictl/pkg/uinput"
-	"github.com/pipe01/flydigictl/pkg/uinput/evdev"
 	"github.com/pipe01/flydigictl/pkg/utils"
 
 	"github.com/google/gousb"
@@ -36,6 +35,7 @@ type protocolXInput struct {
 	closer io.Closer
 
 	manufacturer, product string
+	gpInfo                *products.GamepadInfo
 
 	isClosed atomic.Bool
 
@@ -44,15 +44,17 @@ type protocolXInput struct {
 	configReader, ledConfigReader *internal.ConfigReader
 
 	configWriter *internal.ConfigWriter
-
-	axes    []uinput.GamepadAxis
-	buttons []uinput.GamepadButton
 }
 
-func Open() (protocol.Protocol, error) {
+func Open() (prot protocol.Protocol, err error) {
 	ctx := gousb.NewContext()
 
 	var closers utils.MultiCloser
+	defer func() {
+		if err != nil {
+			closers.Close()
+		}
+	}()
 
 	devs, err := ctx.OpenDevices(func(desc *gousb.DeviceDesc) bool {
 		return desc.Vendor == 0x045e && desc.Product == 0x028e
@@ -111,31 +113,7 @@ func Open() (protocol.Protocol, error) {
 		return nil, fmt.Errorf("open in endpoint: %w", err)
 	}
 
-	axes := []uinput.GamepadAxis{
-		{Name: "Left Joystick X", Code: evdev.ABS_X, Min: -32768, Max: 32767},
-		{Name: "Left Joystick Y", Code: evdev.ABS_Y, Min: -32768, Max: 32767},
-		{Name: "Right Joystick X", Code: evdev.ABS_RX, Min: -32768, Max: 32767},
-		{Name: "Right Joystick Y", Code: evdev.ABS_RY, Min: -32768, Max: 32767},
-		{Name: "Left Trigger", Code: evdev.ABS_Z, Min: 0, Max: 255},
-		{Name: "Right Trigger", Code: evdev.ABS_RZ, Min: 0, Max: 255},
-		{Name: "DPad X", Code: evdev.ABS_HAT0X, Min: -1, Max: 1},
-		{Name: "DPad Y", Code: evdev.ABS_HAT0Y, Min: -1, Max: 1},
-	}
-	buttons := []uinput.GamepadButton{
-		{Name: "A", Code: evdev.BTN_A},
-		{Name: "B", Code: evdev.BTN_B},
-		{Name: "X", Code: evdev.BTN_X},
-		{Name: "Y", Code: evdev.BTN_Y},
-		{Name: "Start", Code: evdev.BTN_START},
-		{Name: "Select", Code: evdev.BTN_SELECT},
-		{Name: "Left Joystick", Code: evdev.BTN_THUMBL},
-		{Name: "Right Joystick", Code: evdev.BTN_THUMBR},
-		{Name: "Left Bumper", Code: evdev.BTN_TL},
-		{Name: "Right Bumper", Code: evdev.BTN_TR},
-		{Name: "C", Code: evdev.BTN_C},
-		{Name: "Z", Code: evdev.BTN_Z},
-		{Name: "Home", Code: evdev.BTN_MODE},
-	}
+	gpInfo := products.Gamepads[products.GamepadVader3]
 
 	p := &protocolXInput{
 		in:              inep,
@@ -147,8 +125,7 @@ func Open() (protocol.Protocol, error) {
 		configReader:    internal.NewConfigReader(packageLength, 10),
 		ledConfigReader: internal.NewConfigReader(ledPackageLength, 10),
 		configWriter:    internal.NewConfigWriter(outep),
-		axes:            axes,
-		buttons:         buttons,
+		gpInfo:          &gpInfo,
 	}
 	go p.readLoop()
 
@@ -156,7 +133,7 @@ func Open() (protocol.Protocol, error) {
 }
 
 func (d *protocolXInput) Inputs() ([]uinput.GamepadAxis, []uinput.GamepadButton) {
-	return d.axes, d.buttons
+	return d.gpInfo.Axes, d.gpInfo.Buttons
 }
 
 func (d *protocolXInput) Manufacturer() string {
@@ -211,52 +188,15 @@ func (d *protocolXInput) readLoop() {
 }
 
 func (d *protocolXInput) resolveUsbData(p []byte) (protocol.Message, bool) {
-	if len(p) == 32 && p[0] == 0 && p[1] == 20 {
-		// p[14], p[15] and p[16] are the gyroscope axes, but there are no evdev codes for them.
-		// We could create a second virtual gamepad only for gyroscope but that's probably confusing for the user.
-
-		var dpadx, dpady int32
-		if (p[2]>>0)&1 != 0 {
-			dpady -= 1
-		}
-		if (p[2]>>1)&1 != 0 {
-			dpady += 1
-		}
-		if (p[2]>>2)&1 != 0 {
-			dpadx -= 1
-		}
-		if (p[2]>>3)&1 != 0 {
-			dpadx += 1
-		}
-
+	buttons, axes, ok := utils.ParseXboxGamepadInput(p)
+	if ok {
 		return protocol.MessageGamepadInput{
-			Buttons: []bool{
-				(p[3]>>4)&1 != 0,
-				(p[3]>>5)&1 != 0,
-				(p[3]>>6)&1 != 0,
-				(p[3]>>7)&1 != 0,
-				(p[2]>>4)&1 != 0,
-				(p[2]>>5)&1 != 0,
-				(p[18]>>6)&1 != 0,
-				(p[18]>>7)&1 != 0,
-				(p[3]>>0)&1 != 0,
-				(p[3]>>1)&1 != 0,
-				(p[19]>>0)&1 != 0,
-				(p[19]>>1)&1 != 0,
-				(p[3]>>2)&1 != 0,
-			},
-			Axes: []int32{
-				int32(int16(binary.LittleEndian.Uint16(p[6:]))),
-				-int32(int16(binary.LittleEndian.Uint16(p[8:]))),
-				int32(int16(binary.LittleEndian.Uint16(p[10:]))),
-				-int32(int16(binary.LittleEndian.Uint16(p[12:]))),
-				int32(p[4]),
-				int32(p[5]),
-				dpadx,
-				dpady,
-			},
+			Buttons: buttons,
+			Axes:    axes,
 		}, true
-	} else if p[14] == 0xA5 {
+	}
+
+	if p[14] == 0xA5 {
 		switch p[15] {
 		case 16:
 			return protocol.MessageGamePadInfo{
@@ -349,7 +289,7 @@ func (d *protocolXInput) sendCommand(ctx context.Context, cmd byte, args ...byte
 	log.Debug().Uint8("cmd", cmd).Bytes("args", args).Msg("sending command")
 
 	pkg := make([]byte, 15)
-	pkg[0] = 165
+	pkg[0] = 0xA5
 	pkg[1] = cmd
 	copy(pkg[2:], args)
 

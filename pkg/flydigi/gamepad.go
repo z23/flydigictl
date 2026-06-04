@@ -406,10 +406,10 @@ func getConfigRetry[T any](ctx context.Context, prot protocol.Protocol, v *utils
 		retriesLeft := 3
 
 		for retriesLeft > 0 {
-			ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			ictx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			defer cancel()
 
-			err := prot.Send(ctx, cmd)
+			err := prot.Send(ictx, cmd)
 			if err != nil {
 				return nil, fmt.Errorf("send command: %w", err)
 			}
@@ -418,7 +418,7 @@ func getConfigRetry[T any](ctx context.Context, prot protocol.Protocol, v *utils
 			case <-v.NotifyChan():
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(2 * time.Second):
+			case <-ictx.Done():
 				retriesLeft--
 				continue
 			}
