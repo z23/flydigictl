@@ -114,7 +114,7 @@ func OpenGamepad() (*Gamepad, error) {
 
 	axes, buttons := prot.Inputs()
 
-	ug, err := uinput.NewUinputGamepad("Flydigi Vader 3 Pro", axes, buttons)
+	ug, err := uinput.NewUinputGamepad(prot.Product(), axes, buttons)
 	if err != nil {
 		return nil, fmt.Errorf("create uinput gamepad: %w", err)
 	}
@@ -133,12 +133,15 @@ func OpenGamepad() (*Gamepad, error) {
 }
 
 func (g *Gamepad) Close() error {
-	return g.prot.Close()
+	return errors.Join(
+		g.prot.Close(),
+		g.ug.Close(),
+	)
 }
 
 func (g *Gamepad) readLoop() {
 	defer close(g.closech)
-	defer g.prot.Close()
+	defer g.Close()
 
 	for msg := range g.prot.Messages() {
 		if err := g.handleMessage(msg); err != nil {

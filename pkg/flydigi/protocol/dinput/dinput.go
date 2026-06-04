@@ -87,6 +87,14 @@ func (d *protocolDInput) Inputs() ([]uinput.GamepadAxis, []uinput.GamepadButton)
 	return nil, nil
 }
 
+func (d *protocolDInput) Manufacturer() string {
+	return ""
+}
+
+func (d *protocolDInput) Product() string {
+	return ""
+}
+
 func (d *protocolDInput) readLoop() {
 	buf := make([]byte, 32)
 

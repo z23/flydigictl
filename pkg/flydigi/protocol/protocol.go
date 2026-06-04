@@ -24,6 +24,9 @@ type Command interface {
 type Protocol interface {
 	Close() error
 
+	Manufacturer() string
+	Product() string
+
 	Messages() <-chan Message
 	Send(ctx context.Context, cmd Command) error
 

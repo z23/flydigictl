@@ -35,6 +35,8 @@ type protocolXInput struct {
 	out    *gousb.OutEndpoint
 	closer io.Closer
 
+	manufacturer, product string
+
 	isClosed atomic.Bool
 
 	msgch chan protocol.Message
@@ -67,6 +69,21 @@ func Open() (protocol.Protocol, error) {
 
 	dev := devs[0]
 	closers.AddCloser(dev)
+
+	manufacturer, err := dev.Manufacturer()
+	if err != nil {
+		return nil, fmt.Errorf("get manufacturer: %w", err)
+	}
+	product, err := dev.Product()
+	if err != nil {
+		return nil, fmt.Errorf("get manufacturer: %w", err)
+	}
+	serialNumber, err := dev.SerialNumber()
+	if err != nil {
+		return nil, fmt.Errorf("get serial number: %w", err)
+	}
+
+	log.Info().Str("manufacturer", manufacturer).Str("product", product).Str("serial", serialNumber).Msg("found gamepad")
 
 	if err := dev.SetAutoDetach(true); err != nil {
 		log.Err(err).Msg("failed to enable kernel driver auto detach mode")
@@ -124,6 +141,8 @@ func Open() (protocol.Protocol, error) {
 		in:              inep,
 		out:             outep,
 		closer:          &closers,
+		manufacturer:    manufacturer,
+		product:         product,
 		msgch:           make(chan protocol.Message, 10),
 		configReader:    internal.NewConfigReader(packageLength, 10),
 		ledConfigReader: internal.NewConfigReader(ledPackageLength, 10),
@@ -138,6 +157,14 @@ func Open() (protocol.Protocol, error) {
 
 func (d *protocolXInput) Inputs() ([]uinput.GamepadAxis, []uinput.GamepadButton) {
 	return d.axes, d.buttons
+}
+
+func (d *protocolXInput) Manufacturer() string {
+	return d.manufacturer
+}
+
+func (d *protocolXInput) Product() string {
+	return d.product
 }
 
 func (d *protocolXInput) Close() error {
