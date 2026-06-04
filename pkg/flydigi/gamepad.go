@@ -86,7 +86,7 @@ const (
 type commandCallbackFunc func(data []byte)
 
 type Gamepad struct {
-	prot protocol.Protocol
+	prot protocol.Device
 	ug   *uinput.UinputGamepad
 
 	devInfo *utils.CondValue[FDGDeviceInfo]
@@ -401,7 +401,7 @@ func (g *Gamepad) SaveLEDConfig(ctx context.Context, cfg *config.NewLedConfigBea
 	return nil
 }
 
-func getConfigRetry[T any](ctx context.Context, prot protocol.Protocol, v *utils.CondValue[T], cmd protocol.Command) (*T, error) {
+func getConfigRetry[T any](ctx context.Context, prot protocol.Device, v *utils.CondValue[T], cmd protocol.Command) (*T, error) {
 	if v.Value == nil {
 		retriesLeft := 3
 

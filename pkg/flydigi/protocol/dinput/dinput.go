@@ -42,7 +42,7 @@ type protocolDInput struct {
 	configReader, ledConfigReader *internal.ConfigReader
 }
 
-func Open() (prot protocol.Protocol, err error) {
+func Open() (prot protocol.Device, err error) {
 	ctx := gousb.NewContext()
 
 	var closers utils.MultiCloser

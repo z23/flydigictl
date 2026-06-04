@@ -21,7 +21,7 @@ type Command interface {
 	command()
 }
 
-type Protocol interface {
+type Device interface {
 	Close() error
 
 	Manufacturer() string

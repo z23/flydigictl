@@ -46,7 +46,7 @@ type protocolXInput struct {
 	configWriter *internal.ConfigWriter
 }
 
-func Open() (prot protocol.Protocol, err error) {
+func Open() (prot protocol.Device, err error) {
 	ctx := gousb.NewContext()
 
 	var closers utils.MultiCloser
