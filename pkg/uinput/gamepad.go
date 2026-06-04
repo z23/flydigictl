@@ -1,9 +1,12 @@
 package uinput
 
 import (
+	"errors"
 	"fmt"
+	"io"
 
 	"github.com/pipe01/flydigictl/pkg/uinput/evdev"
+	"github.com/rs/zerolog/log"
 )
 
 type GamepadAxis struct {
@@ -51,23 +54,21 @@ func NewUinputGamepad(name string, axes []GamepadAxis, buttons []GamepadButton) 
 	}, map[evdev.EvType][]evdev.EvCode{
 		evdev.EV_KEY: keys,
 		evdev.EV_ABS: abs,
-		evdev.EV_FF:  {evdev.FF_RUMBLE},
+		evdev.EV_FF:  {evdev.FF_CONSTANT},
 		evdev.EV_SYN: {evdev.SYN_REPORT},
 	}, absSetup)
 	if err != nil {
 		return nil, err
 	}
 
-	go func() {
-		ev, err := dev.ReadOne()
-		println(ev, err)
-	}()
-
-	return &UinputGamepad{
+	ug := &UinputGamepad{
 		dev:     dev,
 		axes:    axes,
 		buttons: buttons,
-	}, nil
+	}
+	go ug.readLoop()
+
+	return ug, nil
 }
 
 func (g *UinputGamepad) Close() error {
@@ -80,6 +81,35 @@ func (g *UinputGamepad) Close() error {
 	}
 
 	return nil
+}
+
+func (g *UinputGamepad) readLoop() {
+	for {
+		ev, err := g.dev.ReadOne()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				log.Err(err).Msg("failed to read uinput events")
+			}
+
+			break
+		}
+
+		log.Debug().Uint16("type", uint16(ev.Type)).Uint16("code", uint16(ev.Code)).Int32("value", ev.Value).Msg("got uinput event")
+
+		switch ev.Type {
+		case evdev.EV_FF:
+			err = g.dev.WriteOne(&evdev.InputEvent{
+				Type:  evdev.EV_FF_STATUS,
+				Code:  ev.Code,
+				Value: evdev.FF_STATUS_PLAYING,
+			})
+			if err != nil {
+				log.Err(err).Msg("failed to write FF status")
+			}
+		}
+	}
+
+	log.Debug().Msg("uinput read loop exited")
 }
 
 func (g *UinputGamepad) Sync() error {
