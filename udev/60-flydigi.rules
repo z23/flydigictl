@@ -1,0 +1,8 @@
+# Let the logged-in user configure a Flydigi controller without running the tool as root.
+# XInput mode uses the Xbox 360 id. The manufacturer string keeps a real Xbox controller out.
+
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="028e", ATTR{manufacturer}=="Flydigi", MODE="0660", TAG+="uaccess"
+
+# DInput mode. Current Flydigi pads share this id; the tool checks the protocol reply before writing.
+SUBSYSTEM=="usb", ATTR{idVendor}=="04b4", ATTR{idProduct}=="2412", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04b4", ATTRS{idProduct}=="2412", MODE="0660", TAG+="uaccess"

@@ -238,7 +238,11 @@ func ConvertByteByNewLedConfig(buf *bytes.Buffer, cfg *NewLedConfigBean) {
 	buf.WriteByte(cfg.Light_scale)
 	buf.WriteByte(cfg.Rgb_num)
 	buf.WriteByte(byte(cfg.LedMode))
-	buf.Write(utils.Repeat(byte(255), 11))
+	if len(cfg.Reserve) == 11 {
+		buf.Write(cfg.Reserve)
+	} else {
+		buf.Write(utils.Repeat(byte(255), 11))
+	}
 
 	for _, g := range cfg.LedGroups {
 		for _, u := range g.Units {

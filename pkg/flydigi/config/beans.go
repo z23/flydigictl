@@ -1,6 +1,10 @@
 package config
 
-import "github.com/pipe01/flydigictl/pkg/utils"
+import (
+	"math"
+
+	"github.com/pipe01/flydigictl/pkg/utils"
+)
 
 type AllConfigBean struct {
 	Version        string
@@ -90,7 +94,14 @@ func (b *NewLedConfigBean) SetSteady(color LedUnit) {
 func (b *NewLedConfigBean) SetStreamlined(speed float32) {
 	b.LedMode = LedModeStreamlined
 	b.Loop_End = 5
-	b.Loop_time = 100 - byte(speed*100)
+	scaled := int(math.Round(float64(speed) * 100))
+	if scaled < 0 {
+		scaled = 0
+	}
+	if scaled > 100 {
+		scaled = 100
+	}
+	b.Loop_time = byte(100 - scaled)
 	b.Rgb_num = 5
 	b.LedGroups = getLedGroupList(0, 5)
 }

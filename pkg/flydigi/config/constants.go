@@ -450,28 +450,28 @@ var ledUnits = [][][][]byte{
 }
 
 func getLedGroupList(modeId, ledNum int) []*LedGroup {
-	groups := make([]*LedGroup, 0)
+	groups := make([]*LedGroup, 0, 16)
 
 	for i := 0; i < 16; i++ {
-		if i < ledNum {
+		g := &LedGroup{}
+		if i < ledNum && modeId >= 0 && modeId < len(ledUnits) && i < len(ledUnits[modeId]) {
+			frames := ledUnits[modeId][i]
 			for j := 0; j < 10; j++ {
-				groups = append(groups, &LedGroup{
-					Units: []*LedUnit{
-						{
-							R: ledUnits[modeId][i][j][0],
-							G: ledUnits[modeId][i][j][1],
-							B: ledUnits[modeId][i][j][2],
-						},
-					},
-				})
+				src := []byte{0, 0, 0}
+				if len(frames) > 0 {
+					src = frames[len(frames)-1]
+					if j < len(frames) {
+						src = frames[j]
+					}
+				}
+				g.Units = append(g.Units, &LedUnit{R: src[0], G: src[1], B: src[2]})
 			}
 		} else {
-			groups = append(groups, &LedGroup{
-				Units: utils.RepeatFunc(func() *LedUnit {
-					return &LedUnit{0, 0, 0}
-				}, 10),
-			})
+			g.Units = utils.RepeatFunc(func() *LedUnit {
+				return &LedUnit{}
+			}, 10)
 		}
+		groups = append(groups, g)
 	}
 
 	return groups

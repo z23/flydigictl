@@ -1,11 +1,18 @@
 package xinput
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol"
 	"github.com/pipe01/flydigictl/pkg/flydigi/protocol/internal"
@@ -33,8 +40,7 @@ type protocolXInput struct {
 	out    *gousb.OutEndpoint
 	closer io.Closer
 
-	isClosed       atomic.Bool
-	xpadWasEnabled bool
+	isClosed atomic.Bool
 
 	msgch chan protocol.Message
 
@@ -43,52 +49,139 @@ type protocolXInput struct {
 	configWriter *internal.ConfigWriter
 }
 
+func isFlydigiXInput(d *gousb.Device) bool {
+	mfr, merr := d.Manufacturer()
+	prod, perr := d.Product()
+	if merr != nil && perr != nil {
+		return false
+	}
+	blob := strings.ToLower(mfr + "\n" + prod)
+	return strings.Contains(blob, "flydigi") || strings.Contains(blob, "vader")
+}
+
+// attachKernelDriver asks usbfs to bind the interface back to its kernel driver.
+// libusb's auto-detach does not reattach when the driver was removed before the
+// interface was claimed, which is what gousb does inside Config().
+func attachKernelDriver(bus, addr, iface int) {
+	path := fmt.Sprintf("/dev/bus/usb/%03d/%03d", bus, addr)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		log.Debug().Err(err).Str("path", path).Msg("open usbfs to reattach driver")
+		return
+	}
+	defer f.Close()
+
+	type usbdevfsIoctl struct {
+		ifno      int32
+		ioctlCode int32
+		data      uint64
+	}
+	const (
+		usbdevfsIoctlReq = 0xc0105512
+		usbdevfsConnect  = 0x5517
+	)
+	cmd := usbdevfsIoctl{ifno: int32(iface), ioctlCode: usbdevfsConnect}
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), usbdevfsIoctlReq, uintptr(unsafe.Pointer(&cmd)))
+	if errno != 0 && errno != syscall.EBUSY {
+		log.Error().Err(errno).Str("path", path).Msg("reattach kernel driver")
+	}
+}
+
+func reloadModule(name string) {
+	if name == "" {
+		return
+	}
+	if err := modprobe.Load(name, ""); err == nil {
+		return
+	}
+	if out, err := exec.Command("modprobe", name).CombinedOutput(); err != nil {
+		log.Err(err).Str("module", name).Str("output", strings.TrimSpace(string(out))).Msg("failed to load xpad module")
+	}
+}
+
 func Open() (protocol.Protocol, error) {
 	ctx := gousb.NewContext()
-
-	var closers utils.MultiCloser
 
 	devs, err := ctx.OpenDevices(func(desc *gousb.DeviceDesc) bool {
 		return desc.Vendor == 0x045e && desc.Product == 0x028e
 	})
-	if err != nil {
+	if err != nil && len(devs) == 0 {
+		ctx.Close()
 		return nil, fmt.Errorf("enumerate devices: %w", err)
 	}
 
 	log.Debug().Int("count", len(devs)).Msg("found xinput usb devices")
 
-	if len(devs) == 0 {
+	var dev *gousb.Device
+	for _, d := range devs {
+		if dev == nil && isFlydigiXInput(d) {
+			dev = d
+			continue
+		}
+		d.Close()
+	}
+	if dev == nil {
+		ctx.Close()
 		return nil, protocol.ErrGamepadNotPresent
 	}
 
-	dev := devs[0]
-	closers.AddCloser(dev)
+	// Detach xpad from this device only. libusb reattaches it when the interface is released.
+	if err := dev.SetAutoDetach(true); err != nil {
+		log.Debug().Err(err).Msg("set auto detach")
+	}
 
 	cfg, err := dev.Config(1)
+	var xpadModule string
 	if err != nil {
-		return nil, fmt.Errorf("open configuration: %w", err)
-	}
-	closers.AddCloser(cfg)
-
-	err = modprobe.Remove("xpad")
-	xpadWasEnabled := err == nil
-	if xpadWasEnabled {
-		log.Debug().Msg("unloaded xpad module")
+		for _, mod := range []string{"xpad", "xpad_noone"} {
+			if modprobe.Remove(mod) == nil {
+				xpadModule = mod
+				log.Debug().Str("module", mod).Msg("unloaded xpad module")
+				break
+			}
+		}
+		if xpadModule == "" {
+			dev.Close()
+			ctx.Close()
+			return nil, fmt.Errorf("open configuration: %w", err)
+		}
+		cfg, err = dev.Config(1)
+		if err != nil {
+			reloadModule(xpadModule)
+			dev.Close()
+			ctx.Close()
+			return nil, fmt.Errorf("open configuration: %w", err)
+		}
 	}
 
 	intf, err := cfg.Interface(0, 0)
 	if err != nil {
+		cfg.Close()
+		dev.Close()
+		ctx.Close()
+		reloadModule(xpadModule)
 		return nil, fmt.Errorf("open interface: %w", err)
 	}
+
+	bus, addr := dev.Desc.Bus, dev.Desc.Address
+	var closers utils.MultiCloser
+	closers.AddFunc(func() {
+		attachKernelDriver(bus, addr, 0)
+		reloadModule(xpadModule)
+	})
+	closers.AddCloser(dev)
+	closers.AddCloser(cfg)
 	closers.AddFunc(intf.Close)
 
 	outep, err := intf.OutEndpoint(5)
 	if err != nil {
+		closers.Close()
 		return nil, fmt.Errorf("open out endpoint: %w", err)
 	}
 
 	inep, err := intf.InEndpoint(1)
 	if err != nil {
+		closers.Close()
 		return nil, fmt.Errorf("open in endpoint: %w", err)
 	}
 
@@ -96,7 +189,6 @@ func Open() (protocol.Protocol, error) {
 		in:              inep,
 		out:             outep,
 		closer:          &closers,
-		xpadWasEnabled:  xpadWasEnabled,
 		msgch:           make(chan protocol.Message, 10),
 		configReader:    internal.NewConfigReader(packageLength, 10),
 		ledConfigReader: internal.NewConfigReader(ledPackageLength, 10),
@@ -112,17 +204,7 @@ func (d *protocolXInput) Close() error {
 		return nil
 	}
 
-	err := d.closer.Close()
-	if d.xpadWasEnabled {
-		log.Debug().Msg("loading xpad module")
-
-		err = modprobe.Load("xpad", "")
-		if err != nil {
-			log.Err(err).Msg("failed to load xpad module")
-		}
-	}
-
-	return err
+	return d.closer.Close()
 }
 
 func (d *protocolXInput) Messages() <-chan protocol.Message {
@@ -145,6 +227,9 @@ func (d *protocolXInput) readLoop() {
 		}
 
 		data := buf[:n]
+		if bytes.Contains(data, []byte{0xa5}) {
+			log.Debug().Int("n", n).Str("hex", hex.EncodeToString(data)).Msg("usb in")
+		}
 
 		msg, ok := d.resolveUsbData(data)
 		if ok {
@@ -154,63 +239,65 @@ func (d *protocolXInput) readLoop() {
 }
 
 func (d *protocolXInput) resolveUsbData(p []byte) (protocol.Message, bool) {
-	if p[14] == 0xA5 {
-		switch p[15] {
-		case 16:
-			return protocol.MessageGamePadInfo{
-				DeviceID:         p[16],
-				DeviceMac:        p[17:21],
-				FW_L:             p[21],
-				FW_H:             p[22],
-				Battery:          p[23],
-				CPUType:          p[24],
-				ConnectionType:   p[25],
-				MotionSensorType: p[26],
+	// Input reports share this endpoint. Flydigi replies are marked 0xA5 at byte 14.
+	if len(p) < 28 || p[14] != 0xA5 {
+		return nil, false
+	}
+	switch p[15] {
+	case 16:
+		return protocol.MessageGamePadInfo{
+			DeviceID:         p[16],
+			DeviceMac:        p[17:21],
+			FW_L:             p[21],
+			FW_H:             p[22],
+			Battery:          p[23],
+			CPUType:          p[24],
+			ConnectionType:   p[25],
+			MotionSensorType: p[26],
+		}, true
+
+	case 17:
+		return protocol.MessageDongleInfo{
+			FW_L: p[16],
+			FW_H: p[17],
+		}, true
+
+	case 32:
+		// HandleGamepadConfigId
+
+	case 34:
+		// HandleGamepadConfigReadCB
+		d.configReader.GotPackage(int(p[16]), p[17:28])
+
+		if d.configReader.IsFinished() {
+			time.Sleep(200 * time.Millisecond)
+			return protocol.MessageGamepadConfigReadCB{
+				Data: d.configReader.Data(),
 			}, true
-
-		case 17:
-			return protocol.MessageDongleInfo{
-				FW_L: p[16],
-				FW_H: p[17],
-			}, true
-
-		case 32:
-			// HandleGamepadConfigId
-
-		case 34:
-			// HandleGamepadConfigReadCB
-			d.configReader.GotPackage(int(p[16]), p[17:28])
-
-			if d.configReader.IsFinished() {
-				time.Sleep(200 * time.Millisecond)
-				return protocol.MessageGamepadConfigReadCB{
-					Data: d.configReader.Data(),
-				}, true
-			}
-
-		case 35, 37: // HandleStartWriteGamepadConfig
-			d.configWriter.Ack(0)
-
-		case 36: // HandleWriteGamepadConfigCBK
-			d.configWriter.Ack(int(p[16]))
-
-		case 39:
-			// HandleLedConfigReadCB
-			d.ledConfigReader.GotPackage(int(p[16]), p[17:28])
-
-			if d.ledConfigReader.IsFinished() {
-				time.Sleep(200 * time.Millisecond)
-				return protocol.MessageLEDConfigReadCB{
-					Data: d.ledConfigReader.Data(),
-				}, true
-			}
-
-		case 41: // HandleWriteLEDConfigCBK
-			d.configWriter.Ack(int(p[16]))
-
-		case 42: // HandleStartWriteLEDConfig
-			d.configWriter.Ack(0)
 		}
+
+	case 35, 37: // HandleStartWriteGamepadConfig
+		d.configWriter.Ack(0)
+
+	case 36: // HandleWriteGamepadConfigCBK
+		d.configWriter.Ack(int(p[16]))
+
+	case 39:
+		// HandleLedConfigReadCB
+		d.ledConfigReader.GotPackage(int(p[16]), p[17:28])
+
+		if d.ledConfigReader.IsFinished() {
+			time.Sleep(200 * time.Millisecond)
+			return protocol.MessageLEDConfigReadCB{
+				Data: d.ledConfigReader.Data(),
+			}, true
+		}
+
+	case 41: // HandleWriteLEDConfigCBK
+		d.configWriter.Ack(int(p[16]))
+
+	case 42: // HandleStartWriteLEDConfig
+		d.configWriter.Ack(0)
 	}
 
 	return nil, false

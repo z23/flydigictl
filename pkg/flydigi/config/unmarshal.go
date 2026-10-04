@@ -557,7 +557,9 @@ func getConfigListsV2(data []byte) configLists {
 func ConvertGPConfigByByte(data []byte) (*AllConfigBean, error) {
 	var cfg AllConfigBean
 
-	if data[0] != 0 || data[1] < 1 {
+	// Vader 3 Pro sends 0x00 here. Vader 4 Pro sends 0x01 and is otherwise
+	// the same V2 layout. Rejecting on the first byte drops the whole packet.
+	if data[1] < 1 {
 		return nil, errors.New("default config")
 	}
 	if data[1] < 2 {
@@ -988,6 +990,10 @@ func ConvertLEDConfigByByte(data []byte) *NewLedConfigBean {
 	const ledNum = 15 // This should be 16 but it seems like the data we get is too short
 	const ledGroupNum = 10
 
+	if len(data) < 20 {
+		return &NewLedConfigBean{Version: append([]byte(nil), data...)}
+	}
+
 	bean := NewLedConfigBean{
 		Version:     data[:2],
 		Type:        data[2],
@@ -1003,6 +1009,10 @@ func ConvertLEDConfigByByte(data []byte) *NewLedConfigBean {
 	startIndex := 20
 
 	for i := 0; i < ledNum; i++ {
+		if startIndex+ledGroupNum*3 > len(data) {
+			break
+		}
+
 		var group LedGroup
 
 		for j := 0; j < ledGroupNum; j++ {
